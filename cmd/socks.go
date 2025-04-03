@@ -159,8 +159,7 @@ var socksCmd = &cobra.Command{
 			log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
 		}
 
-		var username string
-		var password string
+		var username, password string
 		if u, err := cmd.Flags().GetString("username"); err == nil && u != "" {
 			username = u
 		}
@@ -174,6 +173,13 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		// Check if print-access flag is enabled
+		printAccess, err := cmd.Flags().GetBool("print-access")
+		if err != nil {
+			cmd.Printf("Failed to get print-access flag: %v\n", err)
+			return
+		}
+
 		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 		if err != nil {
 			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
@@ -183,35 +189,39 @@ var socksCmd = &cobra.Command{
 
 		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
 
-		var server *socks5.Server
-		if username == "" || password == "" {
-			server = socks5.NewServer(
-				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
-				}),
-				socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout}),
-			)
-		} else {
-			server = socks5.NewServer(
-				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
-				}),
-				socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout}),
-				socks5.WithAuthMethods(
-					[]socks5.Authenticator{
-						socks5.UserPassAuthenticator{
-							Credentials: socks5.StaticCredentials{
-								username: password,
-							},
-						},
-					},
-				),
-			)
+		usqueDialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Log access if print-access is enabled
+			if printAccess {
+				protocol := "TCP"
+				if network == "udp" || network == "udp4" || network == "udp6" {
+					protocol = "UDP"
+				}
+				fmt.Printf("Proxy [%s] %s\n", protocol, addr)
+			}
+
+			// Perform the actual connection
+			return tunNet.DialContext(ctx, network, addr)
 		}
 
+		var authMethods []socks5.Authenticator
+		if username != "" && password != "" {
+			authMethods = append(authMethods, socks5.UserPassAuthenticator{
+				Credentials: socks5.StaticCredentials{username: password},
+			})
+		}
+
+		server := socks5.NewServer(
+			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
+			socks5.WithDial(usqueDialFunc),
+			socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout, printAccess}),
+			socks5.WithAuthMethods(authMethods),
+		)
+
 		log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
+		if printAccess {
+			log.Println("Access logging is enabled")
+		}
+
 		if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
 			cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
 			return
@@ -227,6 +237,8 @@ type TunnelDNSResolver struct {
 	dnsAddrs []netip.Addr
 	// timeout is the timeout for DNS queries on a specific server before trying the next one.
 	timeout time.Duration
+	// printAccess determines whether to log DNS resolutions
+	printAccess bool
 }
 
 // Resolve performs a DNS lookup using the provided DNS resolvers.
@@ -241,6 +253,11 @@ type TunnelDNSResolver struct {
 //   - net.IP: The resolved IP address.
 //   - error: An error if the lookup fails.
 func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// Log DNS resolution if enabled
+	if r.printAccess {
+		fmt.Printf("Proxy [DNS] %s\n", name)
+	}
+
 	var lastErr error
 
 	for _, dnsAddr := range r.dnsAddrs {
@@ -279,5 +296,6 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	socksCmd.Flags().Bool("print-access", false, "Print access logs for each proxy request")
 	rootCmd.AddCommand(socksCmd)
 }
