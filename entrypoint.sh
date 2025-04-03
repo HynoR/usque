@@ -21,7 +21,7 @@ if [ -f /app/etc/config.json ]; then
   exec /bin/usque socks -c /app/etc/config.json $@
 else
   echo "No config.json found, running registration..."
-  if /bin/usque register --tos; then
+  if /bin/usque register --accept-tos; then
     echo "Registration successful, saving config.json to /app/etc/"
     mv config.json /app/etc/
     echo "========================="
