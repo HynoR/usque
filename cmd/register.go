@@ -17,11 +17,11 @@ var registerCmd = &cobra.Command{
 	Long: "Registers a new account and enrolls a device key. Also makes sure that it switches to" +
 		" MASQUE mode. Saves the config to a file.",
 	Run: func(cmd *cobra.Command, args []string) {
-		autoTos, _ := cmd.Flags().GetBool("tos")
-		if autoTos{
-			fmt.Printf("TOS ENABLED\n")
+		autoAcceptTos, _ := cmd.Flags().GetBool("tos")
+		if autoAcceptTos {
+			log.Println("Automatically accepting Cloudflare TOS, Skipping user prompt.")
 		}
-		if config.ConfigLoaded && !autoTos {
+		if config.ConfigLoaded && !autoAcceptTos {
 			fmt.Printf("You already have a config. Do you want to overwrite it? (y/n) ")
 			var response string
 			if _, err := fmt.Scanln(&response); err != nil {
@@ -57,8 +57,7 @@ var registerCmd = &cobra.Command{
 
 		log.Printf("Registering with locale %s and model %s", locale, model)
 
-
-		accountData, err := api.Register(model, locale, autoTos)
+		accountData, err := api.Register(model, locale, autoAcceptTos)
 		if err != nil {
 			log.Fatalf("Failed to register: %v", err)
 		}
@@ -106,6 +105,6 @@ func init() {
 	registerCmd.Flags().StringP("locale", "l", internal.DefaultLocale, "locale")
 	registerCmd.Flags().StringP("model", "m", internal.DefaultModel, "model")
 	registerCmd.Flags().StringP("name", "n", "", "device name")
-	registerCmd.Flags().BoolP("tos", "x", false, "Tos")
+	registerCmd.Flags().BoolP("accept-tos", "", false, "automatically accept cloudflare TOS")
 	rootCmd.AddCommand(registerCmd)
 }
