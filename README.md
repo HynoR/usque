@@ -4,6 +4,40 @@
 
 Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel (currently Linux only), a SOCKS5 proxy, and a HTTP proxy.
 
+## Docker Deploy
+build docker by yourself
+
+```
+git pull https://github.com/HynoR/usque.git
+cd usque
+docker build -t uscf .
+docker run -d \
+  --name uscf \
+  -p 127.0.0.1:7889:1080/tcp \
+  -p 127.0.0.1:7889:1080/udp \
+  -v  /etc/uscf/:/app/etc/ \
+  --log-driver json-file \
+  --log-opt max-size=3m \
+  --restart on-failure \
+ --privileged \
+  uscf
+```
+
+quick use 
+
+```
+docker run -d \
+  --name uscf \
+  -p 127.0.0.1:7889:1080/tcp \
+  -p 127.0.0.1:7889:1080/udp \
+  -v  /etc/uscf/:/app/etc/ \
+  --log-driver json-file \
+  --log-opt max-size=3m \
+  --restart on-failure \
+ --privileged \
+  paluza0606/uscf
+```
+
 ## Table of Contents
 
 - [usque](#usque)
