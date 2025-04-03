@@ -16,6 +16,12 @@ FROM alpine:latest
 
 WORKDIR /app
 
-COPY --from=builder /app/usque /bin/usque
+# Create etc directory for configuration
+RUN mkdir -p /app/etc
 
-ENTRYPOINT ["/bin/usque"]
+COPY --from=builder /app/usque /bin/usque
+# Copy the entrypoint script from the build context
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
