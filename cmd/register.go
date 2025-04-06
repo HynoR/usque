@@ -17,7 +17,7 @@ var registerCmd = &cobra.Command{
 	Long: "Registers a new account and enrolls a device key. Also makes sure that it switches to" +
 		" MASQUE mode. Saves the config to a file.",
 	Run: func(cmd *cobra.Command, args []string) {
-		autoAcceptTos, _ := cmd.Flags().GetBool("tos")
+		autoAcceptTos, _ := cmd.Flags().GetBool("accept-tos")
 		if autoAcceptTos {
 			log.Println("Automatically accepting Cloudflare TOS, Skipping user prompt.")
 		}
