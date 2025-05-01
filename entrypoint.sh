@@ -12,8 +12,9 @@ run_socks_with_monitoring() {
 
 # 检查 config.json 是否存在
 if [ ! -f "config.json" ]; then
-    echo "未找到 config.json，运行 usque register..."
-    /bin/usque register
+    echo "未找到 config.json，运行 usque register 并自动接受服务条款..."
+    # 使用 echo 命令自动回答 "y" 来接受服务条款
+    echo "y" | /bin/usque register
     
     # 检查 register 命令执行后是否创建了 config.json
     if [ -f "config.json" ]; then
