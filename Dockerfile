@@ -10,6 +10,11 @@ FROM alpine:latest
 WORKDIR /app
 # 安装curl工具
 RUN apk add --no-cache curl
+# 定义默认环境变量
+ENV USQUE_BIND_ADDRESS="127.0.0.1"
+ENV USQUE_PORT="1080"
+ENV USQUE_USERNAME=""
+ENV USQUE_PASSWORD=""
 # 复制脚本到容器中
 COPY entrypoint.sh /app/
 COPY healthcheck.sh /app/
