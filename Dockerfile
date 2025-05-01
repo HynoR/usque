@@ -8,9 +8,14 @@ RUN go build -o usque -ldflags="-s -w" .
 
 FROM alpine:latest
 WORKDIR /app
-# 复制 entrypoint.sh 到容器中
+# 安装curl工具
+RUN apk add --no-cache curl
+# 复制脚本到容器中
 COPY entrypoint.sh /app/
-RUN chmod +x /app/entrypoint.sh
+COPY healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
 COPY --from=builder /app/usque /bin/usque
-# 使用 entrypoint.sh 作为入口点
+# 配置健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD ["/app/healthcheck.sh"]
+# 使用entrypoint.sh作为入口点
 ENTRYPOINT ["/app/entrypoint.sh"]
