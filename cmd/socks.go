@@ -9,7 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"sync/atomic"
+
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -200,11 +200,11 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		password = p
 	}
 
-	reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
-	if err != nil {
-		cmd.Printf("Failed to get reconnect delay: %v\n", err)
-		return
-	}
+	//reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
+	//if err != nil {
+	//	cmd.Printf("Failed to get reconnect delay: %v\n", err)
+	//	return
+	//}
 
 	// 2. 创建 TUN 设备
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
@@ -214,16 +214,27 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 	}
 	defer tunDev.Close()
 
+	// 配置连接
+	configTunnel := api.ConnectionConfig{
+		TLSConfig:         tlsConfig,
+		KeepAlivePeriod:   keepalivePeriod,
+		InitialPacketSize: initialPacketSize,
+		Endpoint:          endpoint,
+		MTU:               mtu,
+		MaxPacketRate:     2048, // 每秒5000个数据包
+		MaxBurst:          256,  // 突发最多处理500个数据包
+		ReconnectStrategy: &api.ExponentialBackoff{
+			InitialDelay: 1 * time.Second,
+			MaxDelay:     5 * time.Minute,
+			Factor:       2.0,
+		},
+	}
+
 	// 3. 后台协程维护 MASQUE 隧道连接
 	go api.MaintainTunnel(
 		context.Background(),
-		tlsConfig,
-		keepalivePeriod,
-		initialPacketSize,
-		endpoint,
+		configTunnel,
 		api.NewNetstackAdapter(tunDev),
-		mtu,
-		reconnectDelay,
 	)
 
 	// 4. 构建 Socks5.Server
@@ -241,6 +252,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		server = socks5.NewServer(
 			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
 			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
+				log.Printf("[Socks] Connecting to (%s) %s", network, addr)
 				return tunNet.DialContext(ctx, network, addr)
 			}),
 			socks5.WithResolver(dnsResolver),
@@ -313,63 +325,58 @@ func (r *ParallelCachedDNSResolver) Resolve(ctx context.Context, name string) (c
 
 // 并行解析，任何一个 DNS 服务器返回成功即返回
 func (r *ParallelCachedDNSResolver) resolveParallel(ctx context.Context, name string) (net.IP, error) {
-	var (
-		wg         sync.WaitGroup
-		successIP  atomic.Value
-		firstError atomic.Value
-	)
-	successIP.Store(net.IP(nil)) // 初始为 nil
-	firstError.Store(error(nil)) // 初始为 nil
+	type result struct {
+		ip  net.IP
+		err error
+	}
+	resultCh := make(chan result, 1)
 
-	// 创建一个可以 cancel 的上下文，以便第一个完成后，取消其他请求
+	// 可 cancel 的上下文
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var wg sync.WaitGroup
 	for _, dnsAddr := range r.DNSAddrs {
 		wg.Add(1)
 		go func(addr netip.Addr) {
 			defer wg.Done()
-
+			// 构造 resolver 与超时
 			dialer := func(ctx context.Context, network, address string) (net.Conn, error) {
 				return r.TunNet.DialContext(ctx, "udp", net.JoinHostPort(addr.String(), "53"))
 			}
-
-			resolver := &net.Resolver{
-				PreferGo: true,
-				Dial:     dialer,
-			}
-
-			// 设置超时
+			resolver := &net.Resolver{PreferGo: true, Dial: dialer}
 			ctxTimeout, cancelTimeout := context.WithTimeout(ctx, r.Timeout)
 			defer cancelTimeout()
 
 			ips, err := resolver.LookupIP(ctxTimeout, "ip", name)
 			if err == nil && len(ips) > 0 {
-				// 如果还没有成功 IP，则设置成功结果
-				if successIP.Load() == nil {
-					successIP.Store(ips[0]) // 存储第一条 ip
-					cancel()                // 取消其他并发查询
+				// 尝试写入第一个结果
+				select {
+				case resultCh <- result{ip: ips[0], err: nil}:
+					cancel() // 拿到第一个就 cancel 其他
+				default:
 				}
 			} else {
-				// 记录下第一个出现的错误
-				if firstError.Load() == nil {
-					firstError.Store(err)
+				// 如果还没收到任何结果，就写入错误
+				select {
+				case resultCh <- result{ip: nil, err: fmt.Errorf("server %s: %w", addr, err)}:
+				default:
 				}
 			}
 		}(dnsAddr)
 	}
 
-	wg.Wait()
+	// 等待所有 goroutine 结束后关闭 channel
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
 
-	ip, _ := successIP.Load().(net.IP)
-	if ip == nil {
-		e := firstError.Load()
-		if err, ok := e.(error); ok && err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("DNS query failed but no error captured")
+	// 取第一个写入的结果
+	if res, ok := <-resultCh; ok {
+		return res.ip, res.err
 	}
-	return ip, nil
+	return nil, fmt.Errorf("all DNS queries failed")
 }
 
 // 从缓存中获取
