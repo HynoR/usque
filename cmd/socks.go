@@ -231,7 +231,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 	}
 
 	// 3. 后台协程维护 MASQUE 隧道连接
-	go api.MaintainTunnel(
+	go api.MaintainTunnelV2(
 		context.Background(),
 		configTunnel,
 		api.NewNetstackAdapter(tunDev),

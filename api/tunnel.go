@@ -249,9 +249,88 @@ func (b *ExponentialBackoff) Reset() {
 // func (OLD)MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration,
 //
 //	initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
+func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod time.Duration, initialPacketSize uint16, endpoint *net.UDPAddr, device TunnelDevice, mtu int, reconnectDelay time.Duration) {
+	for {
+		log.Printf("Establishing MASQUE connection to %s:%d", endpoint.IP, endpoint.Port)
+		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
+			ctx,
+			tlsConfig,
+			internal.DefaultQuicConfig(keepalivePeriod, initialPacketSize),
+			internal.ConnectURI,
+			endpoint,
+		)
+		if err != nil {
+			log.Printf("Failed to connect tunnel: %v", err)
+			time.Sleep(reconnectDelay)
+			continue
+		}
+		if rsp.StatusCode != 200 {
+			log.Printf("Tunnel connection failed: %s", rsp.Status)
+			ipConn.Close()
+			if udpConn != nil {
+				udpConn.Close()
+			}
+			if tr != nil {
+				tr.Close()
+			}
+			time.Sleep(reconnectDelay)
+			continue
+		}
 
-// MaintainTunnel continuously connects to the MASQUE server, then starts two
-func MaintainTunnel(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
+		log.Println("Connected to MASQUE server")
+		errChan := make(chan error, 2)
+
+		go func() {
+			for {
+				pkt, err := device.ReadPacket(mtu)
+				if err != nil {
+					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
+					return
+				}
+				icmp, err := ipConn.WritePacket(pkt)
+				if err != nil {
+					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
+					return
+				}
+				if len(icmp) > 0 {
+					if err := device.WritePacket(icmp); err != nil {
+						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
+						return
+					}
+				}
+			}
+		}()
+
+		go func() {
+			buf := make([]byte, mtu)
+			for {
+				n, err := ipConn.ReadPacket(buf, true)
+				if err != nil {
+					errChan <- fmt.Errorf("failed to read from IP connection: %v", err)
+					return
+				}
+				if err := device.WritePacket(buf[:n]); err != nil {
+					errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
+					return
+				}
+			}
+		}()
+
+		err = <-errChan
+		log.Printf("Tunnel connection lost: %v. Reconnecting...", err)
+		ipConn.Close()
+		if udpConn != nil {
+			udpConn.Close()
+		}
+		if tr != nil {
+			tr.Close()
+		}
+		time.Sleep(reconnectDelay)
+	}
+}
+
+// MaintainTunnelV2 continuously connects to the MASQUE server, then starts two
+func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device TunnelDevice) {
 	stats := &TunnelStats{}
 	reconnectAttempt := 0
 
