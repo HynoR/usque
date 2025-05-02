@@ -41,7 +41,7 @@ type TunnelStats struct {
 	BytesIn       uint64
 	BytesOut      uint64
 	Errors        uint64
-	Reconnections uint64
+	HandShake     uint64
 	LastReconnect time.Time
 	mu            sync.Mutex
 }
@@ -66,10 +66,10 @@ func (s *TunnelStats) RecordError() {
 	s.Errors++
 }
 
-func (s *TunnelStats) RecordReconnection() {
+func (s *TunnelStats) RecordHandShake() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Reconnections++
+	s.HandShake++
 	s.LastReconnect = time.Now()
 }
 
@@ -404,7 +404,7 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 		// 连接成功，重置重连尝试计数和策略
 		reconnectAttempt = 0
 		config.ReconnectStrategy.Reset()
-		stats.RecordReconnection()
+		stats.RecordHandShake()
 		log.Println("Connected to MASQUE server")
 
 		// 创建子上下文，用于在需要时取消转发goroutine
@@ -531,7 +531,7 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 
 		// 监控统计信息的goroutine
 		go func() {
-			ticker := time.NewTicker(30 * time.Second)
+			ticker := time.NewTicker(300 * time.Second)
 			defer ticker.Stop()
 
 			for {
@@ -539,8 +539,8 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 				case <-forwardingCtx.Done():
 					return
 				case <-ticker.C:
-					log.Printf("Tunnel stats: In: %d pkts (%d bytes), Out: %d pkts (%d bytes), Errors: %d, Reconnects: %d",
-						stats.PacketsIn, stats.BytesIn, stats.PacketsOut, stats.BytesOut, stats.Errors, stats.Reconnections)
+					log.Printf("Tunnel stats: In: %d pkts (%d bytes), Out: %d pkts (%d bytes), Errors: %d, HandShake: %d",
+						stats.PacketsIn, stats.BytesIn, stats.PacketsOut, stats.BytesOut, stats.Errors, stats.HandShake)
 				}
 			}
 		}()
