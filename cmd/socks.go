@@ -221,8 +221,8 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		InitialPacketSize: initialPacketSize,
 		Endpoint:          endpoint,
 		MTU:               mtu,
-		MaxPacketRate:     2048, // 每秒5000个数据包
-		MaxBurst:          256,  // 突发最多处理500个数据包
+		MaxPacketRate:     8192,
+		MaxBurst:          1024,
 		ReconnectStrategy: &api.ExponentialBackoff{
 			InitialDelay: 1 * time.Second,
 			MaxDelay:     5 * time.Minute,
