@@ -20,7 +20,8 @@ import (
 //
 // Parameters:
 //   - model: string - The device model string to register. (e.g., "PC")
-//   - locale: string - The user's locale (e.g., "en-US").
+//   - locale: string - The user's locale. (e.g., "en-US")
+//   - jwt: string - Team token to register.
 //   - acceptTos: bool - Whether the user accepts the Terms of Service (TOS). If false, the user will be prompted to accept.
 //
 // Returns:
@@ -29,11 +30,11 @@ import (
 //
 // Example:
 //
-//	account, err := Register("PC", "en-US", false)
+//	account, err := Register("PC", "en-US", "", false)
 //	if err != nil {
 //	    log.Fatalf("Registration failed: %v", err)
 //	}
-func Register(model, locale string, acceptTos bool) (models.AccountData, error) {
+func Register(model, locale, jwt string, acceptTos bool) (models.AccountData, error) {
 	wgKey, err := internal.GenerateRandomWgPubkey()
 	if err != nil {
 		return models.AccountData{}, fmt.Errorf("failed to generate wg key: %v", err)
@@ -79,6 +80,10 @@ func Register(model, locale string, acceptTos bool) (models.AccountData, error) 
 
 	for k, v := range internal.Headers {
 		req.Header.Set(k, v)
+	}
+
+	if jwt != "" {
+		req.Header.Set("CF-Access-Jwt-Assertion", jwt)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
