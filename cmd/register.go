@@ -105,6 +105,6 @@ func init() {
 	registerCmd.Flags().StringP("locale", "l", internal.DefaultLocale, "locale")
 	registerCmd.Flags().StringP("model", "m", internal.DefaultModel, "model")
 	registerCmd.Flags().StringP("name", "n", "", "device name")
-	registerCmd.Flags().BoolP("accept-tos", "", false, "skip manually accept cloudflare TOS")
+	registerCmd.Flags().BoolP("accept-tos", "", false, "automatically accept cloudflare TOS")
 	rootCmd.AddCommand(registerCmd)
 }

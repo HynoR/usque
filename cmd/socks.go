@@ -7,9 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -20,12 +17,267 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-// socksCmd 命令。
 var socksCmd = &cobra.Command{
 	Use:   "socks",
 	Short: "Expose Warp as a SOCKS5 proxy",
 	Long:  "Dual-stack SOCKS5 proxy with optional authentication. Doesn't require elevated privileges.",
-	Run:   runSocksCmd,
+	Run: func(cmd *cobra.Command, args []string) {
+		if !config.ConfigLoaded {
+			cmd.Println("Config not loaded. Please register first.")
+			return
+		}
+
+		sni, err := cmd.Flags().GetString("sni-address")
+		if err != nil {
+			cmd.Printf("Failed to get SNI address: %v\n", err)
+			return
+		}
+
+		privKey, err := config.AppConfig.GetEcPrivateKey()
+		if err != nil {
+			cmd.Printf("Failed to get private key: %v\n", err)
+			return
+		}
+		peerPubKey, err := config.AppConfig.GetEcEndpointPublicKey()
+		if err != nil {
+			cmd.Printf("Failed to get public key: %v\n", err)
+			return
+		}
+
+		cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
+		if err != nil {
+			cmd.Printf("Failed to generate cert: %v\n", err)
+			return
+		}
+
+		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
+		if err != nil {
+			cmd.Printf("Failed to prepare TLS config: %v\n", err)
+			return
+		}
+
+		keepalivePeriod, err := cmd.Flags().GetDuration("keepalive-period")
+		if err != nil {
+			cmd.Printf("Failed to get keepalive period: %v\n", err)
+			return
+		}
+		initialPacketSize, err := cmd.Flags().GetUint16("initial-packet-size")
+		if err != nil {
+			cmd.Printf("Failed to get initial packet size: %v\n", err)
+			return
+		}
+
+		bindAddress, err := cmd.Flags().GetString("bind")
+		if err != nil {
+			cmd.Printf("Failed to get bind address: %v\n", err)
+			return
+		}
+
+		port, err := cmd.Flags().GetString("port")
+		if err != nil {
+			cmd.Printf("Failed to get port: %v\n", err)
+			return
+		}
+
+		connectPort, err := cmd.Flags().GetInt("connect-port")
+		if err != nil {
+			cmd.Printf("Failed to get connect port: %v\n", err)
+			return
+		}
+
+		var endpoint *net.UDPAddr
+		if ipv6, err := cmd.Flags().GetBool("ipv6"); err == nil && !ipv6 {
+			endpoint = &net.UDPAddr{
+				IP:   net.ParseIP(config.AppConfig.EndpointV4),
+				Port: connectPort,
+			}
+		} else {
+			endpoint = &net.UDPAddr{
+				IP:   net.ParseIP(config.AppConfig.EndpointV6),
+				Port: connectPort,
+			}
+		}
+
+		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
+		if err != nil {
+			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
+			return
+		}
+
+		tunnelIPv6, err := cmd.Flags().GetBool("no-tunnel-ipv6")
+		if err != nil {
+			cmd.Printf("Failed to get no tunnel IPv6: %v\n", err)
+			return
+		}
+
+		var localAddresses []netip.Addr
+		if !tunnelIPv4 {
+			v4, err := netip.ParseAddr(config.AppConfig.IPv4)
+			if err != nil {
+				cmd.Printf("Failed to parse IPv4 address: %v\n", err)
+				return
+			}
+			localAddresses = append(localAddresses, v4)
+		}
+		if !tunnelIPv6 {
+			v6, err := netip.ParseAddr(config.AppConfig.IPv6)
+			if err != nil {
+				cmd.Printf("Failed to parse IPv6 address: %v\n", err)
+				return
+			}
+			localAddresses = append(localAddresses, v6)
+		}
+
+		dnsServers, err := cmd.Flags().GetStringArray("dns")
+		if err != nil {
+			cmd.Printf("Failed to get DNS servers: %v\n", err)
+			return
+		}
+
+		var dnsAddrs []netip.Addr
+		for _, dns := range dnsServers {
+			addr, err := netip.ParseAddr(dns)
+			if err != nil {
+				cmd.Printf("Failed to parse DNS server: %v\n", err)
+				return
+			}
+			dnsAddrs = append(dnsAddrs, addr)
+		}
+
+		var dnsTimeout time.Duration
+		if dnsTimeout, err = cmd.Flags().GetDuration("dns-timeout"); err != nil {
+			cmd.Printf("Failed to get DNS timeout: %v\n", err)
+			return
+		}
+
+		mtu, err := cmd.Flags().GetInt("mtu")
+		if err != nil {
+			cmd.Printf("Failed to get MTU: %v\n", err)
+			return
+		}
+		if mtu != 1280 {
+			log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
+		}
+
+		var username, password string
+		if u, err := cmd.Flags().GetString("username"); err == nil && u != "" {
+			username = u
+		}
+		if p, err := cmd.Flags().GetString("password"); err == nil && p != "" {
+			password = p
+		}
+
+		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
+		if err != nil {
+			cmd.Printf("Failed to get reconnect delay: %v\n", err)
+			return
+		}
+
+		// Check if print-access flag is enabled
+		printAccess, err := cmd.Flags().GetBool("print-access")
+		if err != nil {
+			cmd.Printf("Failed to get print-access flag: %v\n", err)
+			return
+		}
+
+		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
+		if err != nil {
+			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
+			return
+		}
+		defer tunDev.Close()
+
+		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+
+		usqueDialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Log access if print-access is enabled
+			if printAccess {
+				protocol := "TCP"
+				if network == "udp" || network == "udp4" || network == "udp6" {
+					protocol = "UDP"
+				}
+				log.Printf("[%s] %s\n", protocol, addr)
+			}
+
+			// Perform the actual connection
+			return tunNet.DialContext(ctx, network, addr)
+		}
+
+		var authMethods []socks5.Authenticator
+		if username != "" && password != "" {
+			authMethods = append(authMethods, socks5.UserPassAuthenticator{
+				Credentials: socks5.StaticCredentials{username: password},
+			})
+		}
+
+		server := socks5.NewServer(
+			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
+			socks5.WithDial(usqueDialFunc),
+			socks5.WithResolver(TunnelDNSResolver{tunNet, dnsAddrs, dnsTimeout, printAccess}),
+			socks5.WithAuthMethods(authMethods),
+		)
+
+		log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
+		if printAccess {
+			log.Println("Access logging is enabled")
+		}
+
+		if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
+			cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
+			return
+		}
+	},
+}
+
+// TunnelDNSResolver implements a DNS resolver that uses the provided DNS servers inside a MASQUE tunnel.
+type TunnelDNSResolver struct {
+	// tunNet is the network stack for the tunnel you want to use for DNS resolution.
+	tunNet *netstack.Net
+	// dnsAddrs is the list of DNS servers to use for resolution.
+	dnsAddrs []netip.Addr
+	// timeout is the timeout for DNS queries on a specific server before trying the next one.
+	timeout time.Duration
+	// printAccess determines whether to log DNS resolutions
+	printAccess bool
+}
+
+// Resolve performs a DNS lookup using the provided DNS resolvers.
+// It tries each resolver in order until one succeeds.
+//
+// Parameters:
+//   - ctx: context.Context - The context for the DNS lookup.
+//   - name: string - The domain name to resolve.
+//
+// Returns:
+//   - context.Context: The context for the DNS lookup.
+//   - net.IP: The resolved IP address.
+//   - error: An error if the lookup fails.
+func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// Log DNS resolution if enabled
+	if r.printAccess {
+		log.Printf("[DNS] %s\n", name)
+	}
+
+	var lastErr error
+
+	for _, dnsAddr := range r.dnsAddrs {
+		dnsHost := net.JoinHostPort(dnsAddr.String(), "53")
+
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return r.tunNet.DialContext(ctx, "udp", dnsHost)
+			},
+		}
+
+		ips, err := resolver.LookupIP(ctx, "ip", name)
+		if err == nil && len(ips) > 0 {
+			return ctx, ips[0], nil
+		}
+		lastErr = err
+	}
+
+	return ctx, nil, fmt.Errorf("all DNS servers failed: %v", lastErr)
 }
 
 func init() {
@@ -44,353 +296,6 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
-
-	// 把 socksCmd 注册到根命令（如果有的话）
+	socksCmd.Flags().Bool("print-access", false, "Print access logs for each proxy request")
 	rootCmd.AddCommand(socksCmd)
-}
-
-// runSocksCmd 是 socksCmd 的执行逻辑
-func runSocksCmd(cmd *cobra.Command, args []string) {
-	// 1. 建议在应用启动时设置 GOMAXPROCS，保证并发时能够利用多核 CPU。
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	if !config.ConfigLoaded {
-		cmd.Println("Config not loaded. Please register first.")
-		return
-	}
-
-	sni, err := cmd.Flags().GetString("sni-address")
-	if err != nil {
-		cmd.Printf("Failed to get SNI address: %v\n", err)
-		return
-	}
-
-	privKey, err := config.AppConfig.GetEcPrivateKey()
-	if err != nil {
-		cmd.Printf("Failed to get private key: %v\n", err)
-		return
-	}
-	peerPubKey, err := config.AppConfig.GetEcEndpointPublicKey()
-	if err != nil {
-		cmd.Printf("Failed to get public key: %v\n", err)
-		return
-	}
-
-	cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
-	if err != nil {
-		cmd.Printf("Failed to generate cert: %v\n", err)
-		return
-	}
-
-	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
-	if err != nil {
-		cmd.Printf("Failed to prepare TLS config: %v\n", err)
-		return
-	}
-
-	keepalivePeriod, err := cmd.Flags().GetDuration("keepalive-period")
-	if err != nil {
-		cmd.Printf("Failed to get keepalive period: %v\n", err)
-		return
-	}
-	initialPacketSize, err := cmd.Flags().GetUint16("initial-packet-size")
-	if err != nil {
-		cmd.Printf("Failed to get initial packet size: %v\n", err)
-		return
-	}
-
-	bindAddress, err := cmd.Flags().GetString("bind")
-	if err != nil {
-		cmd.Printf("Failed to get bind address: %v\n", err)
-		return
-	}
-
-	port, err := cmd.Flags().GetString("port")
-	if err != nil {
-		cmd.Printf("Failed to get port: %v\n", err)
-		return
-	}
-
-	connectPort, err := cmd.Flags().GetInt("connect-port")
-	if err != nil {
-		cmd.Printf("Failed to get connect port: %v\n", err)
-		return
-	}
-
-	var endpoint *net.UDPAddr
-	if ipv6, err := cmd.Flags().GetBool("ipv6"); err == nil && !ipv6 {
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(config.AppConfig.EndpointV4),
-			Port: connectPort,
-		}
-	} else {
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(config.AppConfig.EndpointV6),
-			Port: connectPort,
-		}
-	}
-
-	tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
-	if err != nil {
-		cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
-		return
-	}
-
-	tunnelIPv6, err := cmd.Flags().GetBool("no-tunnel-ipv6")
-	if err != nil {
-		cmd.Printf("Failed to get no tunnel IPv6: %v\n", err)
-		return
-	}
-
-	var localAddresses []netip.Addr
-	if !tunnelIPv4 {
-		v4, err := netip.ParseAddr(config.AppConfig.IPv4)
-		if err != nil {
-			cmd.Printf("Failed to parse IPv4 address: %v\n", err)
-			return
-		}
-		localAddresses = append(localAddresses, v4)
-	}
-	if !tunnelIPv6 {
-		v6, err := netip.ParseAddr(config.AppConfig.IPv6)
-		if err != nil {
-			cmd.Printf("Failed to parse IPv6 address: %v\n", err)
-			return
-		}
-		localAddresses = append(localAddresses, v6)
-	}
-
-	dnsServers, err := cmd.Flags().GetStringArray("dns")
-	if err != nil {
-		cmd.Printf("Failed to get DNS servers: %v\n", err)
-		return
-	}
-
-	var dnsAddrs []netip.Addr
-	for _, dns := range dnsServers {
-		addr, err := netip.ParseAddr(dns)
-		if err != nil {
-			cmd.Printf("Failed to parse DNS server: %v\n", err)
-			return
-		}
-		dnsAddrs = append(dnsAddrs, addr)
-	}
-
-	dnsTimeout, err := cmd.Flags().GetDuration("dns-timeout")
-	if err != nil {
-		cmd.Printf("Failed to get DNS timeout: %v\n", err)
-		return
-	}
-
-	mtu, err := cmd.Flags().GetInt("mtu")
-	if err != nil {
-		cmd.Printf("Failed to get MTU: %v\n", err)
-		return
-	}
-	if mtu != 1280 {
-		log.Println("Warning: MTU is not the default 1280. This is not supported. Packet loss and other issues may occur.")
-	}
-
-	var username string
-	var password string
-	if u, err := cmd.Flags().GetString("username"); err == nil && u != "" {
-		username = u
-	}
-	if p, err := cmd.Flags().GetString("password"); err == nil && p != "" {
-		password = p
-	}
-
-	reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
-	if err != nil {
-		cmd.Printf("Failed to get reconnect delay: %v\n", err)
-		return
-	}
-
-	// 2. 创建 TUN 设备
-	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
-	if err != nil {
-		cmd.Printf("Failed to create virtual TUN device: %v\n", err)
-		return
-	}
-	defer tunDev.Close()
-
-	// 3. 后台协程维护 MASQUE 隧道连接
-	go api.MaintainTunnel(
-		context.Background(),
-		tlsConfig,
-		keepalivePeriod,
-		initialPacketSize,
-		endpoint,
-		api.NewNetstackAdapter(tunDev),
-		mtu,
-		reconnectDelay,
-	)
-
-	// 4. 构建 Socks5.Server
-	//   - Dial 使用 tunNet 的 DialContext
-	//   - Resolver 使用并行 DNS + 缓存
-	dnsResolver := &ParallelCachedDNSResolver{
-		TunNet:   tunNet,
-		DNSAddrs: dnsAddrs,
-		Timeout:  dnsTimeout,
-		TTL:      300 * time.Second, // DNS 缓存生存时间，可视需求调整
-	}
-
-	var server *socks5.Server
-	if username == "" || password == "" {
-		server = socks5.NewServer(
-			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return tunNet.DialContext(ctx, network, addr)
-			}),
-			socks5.WithResolver(dnsResolver),
-		)
-	} else {
-		server = socks5.NewServer(
-			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return tunNet.DialContext(ctx, network, addr)
-			}),
-			socks5.WithResolver(dnsResolver),
-			socks5.WithAuthMethods(
-				[]socks5.Authenticator{
-					socks5.UserPassAuthenticator{
-						Credentials: socks5.StaticCredentials{
-							username: password,
-						},
-					},
-				},
-			),
-		)
-	}
-
-	// 5. 启动 SOCKS5 代理
-	log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
-	if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
-		cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
-		return
-	}
-}
-
-// ======================= 并行 + 缓存 DNS 解析示例 =======================
-
-// ParallelCachedDNSResolver 使用隧道内的 DNS 服务器做解析；
-// 支持并发向多个 DNS 服务器同时发起请求，并对结果进行缓存。
-type ParallelCachedDNSResolver struct {
-	TunNet   *netstack.Net
-	DNSAddrs []netip.Addr
-	Timeout  time.Duration
-	TTL      time.Duration // DNS 缓存的生存时间
-
-	// 缓存结构：map[域名] => { 解析结果, 过期时间 }
-	// sync.Map 用于并发安全
-	cache sync.Map
-}
-
-// dnsCacheEntry 用于存储缓存的解析结果
-type dnsCacheEntry struct {
-	ip       net.IP
-	expireAt time.Time
-}
-
-// Resolve 并行向多个 DNS 服务器发起查询，在收到第一个成功结果后就返回，并缓存结果。
-func (r *ParallelCachedDNSResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	// 1. 如果缓存中已有且未过期，直接返回
-	if ip, ok := r.getFromCache(name); ok {
-		return ctx, ip, nil
-	}
-
-	// 2. 并行向多个 DNS 服务器发起查询
-	ip, err := r.resolveParallel(ctx, name)
-	if err != nil {
-		return ctx, nil, fmt.Errorf("all DNS servers failed for name %s: %v", name, err)
-	}
-
-	// 3. 缓存结果
-	r.setCache(name, ip)
-	return ctx, ip, nil
-}
-
-// 并行解析，任何一个 DNS 服务器返回成功即返回
-func (r *ParallelCachedDNSResolver) resolveParallel(ctx context.Context, name string) (net.IP, error) {
-	var (
-		wg         sync.WaitGroup
-		successIP  atomic.Value
-		firstError atomic.Value
-	)
-	successIP.Store(net.IP(nil)) // 初始为 nil
-	firstError.Store(error(nil)) // 初始为 nil
-
-	// 创建一个可以 cancel 的上下文，以便第一个完成后，取消其他请求
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for _, dnsAddr := range r.DNSAddrs {
-		wg.Add(1)
-		go func(addr netip.Addr) {
-			defer wg.Done()
-
-			dialer := func(ctx context.Context, network, address string) (net.Conn, error) {
-				return r.TunNet.DialContext(ctx, "udp", net.JoinHostPort(addr.String(), "53"))
-			}
-
-			resolver := &net.Resolver{
-				PreferGo: true,
-				Dial:     dialer,
-			}
-
-			// 设置超时
-			ctxTimeout, cancelTimeout := context.WithTimeout(ctx, r.Timeout)
-			defer cancelTimeout()
-
-			ips, err := resolver.LookupIP(ctxTimeout, "ip", name)
-			if err == nil && len(ips) > 0 {
-				// 如果还没有成功 IP，则设置成功结果
-				if successIP.Load() == nil {
-					successIP.Store(ips[0]) // 存储第一条 ip
-					cancel()                // 取消其他并发查询
-				}
-			} else {
-				// 记录下第一个出现的错误
-				if firstError.Load() == nil {
-					firstError.Store(err)
-				}
-			}
-		}(dnsAddr)
-	}
-
-	wg.Wait()
-
-	ip, _ := successIP.Load().(net.IP)
-	if ip == nil {
-		e := firstError.Load()
-		if err, ok := e.(error); ok && err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("DNS query failed but no error captured")
-	}
-	return ip, nil
-}
-
-// 从缓存中获取
-func (r *ParallelCachedDNSResolver) getFromCache(name string) (cachedIP net.IP, found bool) {
-	value, ok := r.cache.Load(name)
-	if !ok {
-		return nil, false
-	}
-	entry, _ := value.(dnsCacheEntry)
-	if time.Now().After(entry.expireAt) {
-		// 缓存过期，删除
-		r.cache.Delete(name)
-		return nil, false
-	}
-	return entry.ip, true
-}
-
-// 设置缓存
-func (r *ParallelCachedDNSResolver) setCache(name string, ip net.IP) {
-	r.cache.Store(name, dnsCacheEntry{
-		ip:       ip,
-		expireAt: time.Now().Add(r.TTL),
-	})
 }
