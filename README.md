@@ -41,7 +41,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
 
 ## Installation
 
-You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`) and Windows (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
+You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`), Windows (`arm64`, `amd64`) and Darwin (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
 
 Extract the archive and you will find a binary named `usque` in the root directory. You can move this binary to a directory in your `PATH` to make it accessible from anywhere.
 
