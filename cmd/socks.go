@@ -250,6 +250,8 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		TTL:      300 * time.Second, // DNS 缓存生存时间，可视需求调整
 	}
 
+	localResolver := internal.NewCachingDNSResolver("", 0)
+
 	var server *socks5.Server
 	if username == "" || password == "" {
 		server = socks5.NewServer(
@@ -258,7 +260,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 				//log.Printf("[Socks] Connecting to (%s) %s", network, addr)
 				return tunNet.DialContext(ctx, network, addr)
 			}),
-			//socks5.WithResolver(dnsResolver),
+			socks5.WithResolver(localResolver),
 		)
 	} else {
 		server = socks5.NewServer(
@@ -266,7 +268,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return tunNet.DialContext(ctx, network, addr)
 			}),
-			//socks5.WithResolver(dnsResolver),
+			socks5.WithResolver(localResolver),
 			socks5.WithAuthMethods(
 				[]socks5.Authenticator{
 					socks5.UserPassAuthenticator{
