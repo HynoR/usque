@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Diniboy1123/usque/internal"
@@ -24,6 +25,19 @@ var packetBufferPool = sync.Pool{
 		return make([]byte, 2048)
 	},
 }
+
+var (
+	packetBufsPool = sync.Pool{
+		New: func() interface{} {
+			return make([][]byte, 1)
+		},
+	}
+	sizesPool = sync.Pool{
+		New: func() interface{} {
+			return make([]int, 1)
+		},
+	}
+)
 
 // TunnelDevice abstracts a TUN device so that we can use the same tunnel-maintenance code
 // regardless of the underlying implementation.
@@ -47,23 +61,17 @@ type TunnelStats struct {
 }
 
 func (s *TunnelStats) RecordPacketIn(bytes int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.PacketsIn++
-	s.BytesIn += uint64(bytes)
+	atomic.AddUint64(&s.PacketsIn, 1)
+	atomic.AddUint64(&s.BytesIn, uint64(bytes))
 }
 
 func (s *TunnelStats) RecordPacketOut(bytes int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.PacketsOut++
-	s.BytesOut += uint64(bytes)
+	atomic.AddUint64(&s.PacketsOut, 1)
+	atomic.AddUint64(&s.BytesOut, uint64(bytes))
 }
 
 func (s *TunnelStats) RecordError() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Errors++
+	atomic.AddUint64(&s.Errors, 1)
 }
 
 func (s *TunnelStats) RecordHandShake() {
@@ -91,20 +99,26 @@ func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// return packetBufs[0][:sizes[0]], nil
 
 	// 从对象池获取缓冲区
-	bufInterface := packetBufferPool.Get()
-	packetBuf := bufInterface.([]byte)
 
-	// 确保缓冲区有足够的大小
-	if cap(packetBuf) < mtu {
-		packetBuf = make([]byte, mtu)
-	} else {
-		packetBuf = packetBuf[:mtu]
-	}
+	packetBuf := packetBufferPool.Get().([]byte)
 
 	// 为多缓冲区接口准备切片
-	packetBufs := make([][]byte, 1)
+	// packetBufs := make([][]byte, 1)
+	// packetBufs[0] = packetBuf
+	// sizes := make([]int, 1)
+
+	packetBufs := packetBufsPool.Get().([][]byte)
+	sizes := sizesPool.Get().([]int)
+
+	// 确保在函数结束时将切片归还到对象池
+	defer func() {
+		packetBufs[0] = nil // 避免内存泄漏
+		packetBufsPool.Put(packetBufs)
+		sizesPool.Put(sizes)
+	}()
+
 	packetBufs[0] = packetBuf
-	sizes := make([]int, 1)
+	sizes[0] = 0
 
 	_, err := n.dev.Read(packetBufs, sizes, 0)
 	if err != nil {
@@ -116,7 +130,9 @@ func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// 创建一个新的切片保存实际数据，并归还原始缓冲区到池中
 	result := make([]byte, sizes[0])
 	copy(result, packetBufs[0][:sizes[0]])
-	packetBufferPool.Put(packetBuf)
+	if cap(packetBuf) < 4096 {
+		packetBufferPool.Put(packetBuf) // 归还缓冲区
+	}
 
 	return result, nil
 }
@@ -147,15 +163,8 @@ func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// return buf[:n], nil
 
 	// 从对象池获取缓冲区
-	bufInterface := packetBufferPool.Get()
-	buf := bufInterface.([]byte)
 
-	// 确保缓冲区有足够的大小
-	if cap(buf) < mtu {
-		buf = make([]byte, mtu)
-	} else {
-		buf = buf[:mtu]
-	}
+	buf := packetBufferPool.Get().([]byte)
 
 	n, err := w.iface.Read(buf)
 	if err != nil {
@@ -167,7 +176,9 @@ func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// 创建一个新的切片保存实际数据，并归还原始缓冲区到池中
 	result := make([]byte, n)
 	copy(result, buf[:n])
-	packetBufferPool.Put(buf)
+	if cap(buf) < 4096 {
+		packetBufferPool.Put(buf) // 归还缓冲区
+	}
 
 	return result, nil
 }
@@ -500,15 +511,8 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 					}
 
 					// 从对象池获取缓冲区
-					bufInterface := packetBufferPool.Get()
-					buf := bufInterface.([]byte)
 
-					// 确保缓冲区有足够的大小
-					if cap(buf) < config.MTU {
-						buf = make([]byte, config.MTU)
-					} else {
-						buf = buf[:config.MTU]
-					}
+					buf := packetBufferPool.Get().([]byte)
 
 					n, err := ipConn.ReadPacket(buf, true)
 					if err != nil {
@@ -523,8 +527,9 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 						errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
 						return
 					}
-
-					packetBufferPool.Put(buf) // 归还缓冲区
+					if cap(buf) < 4096 {
+						packetBufferPool.Put(buf) // 归还缓冲区
+					}
 				}
 			}
 		}()

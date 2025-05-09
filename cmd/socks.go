@@ -18,6 +18,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/things-go/go-socks5"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 // socksCmd 命令。
@@ -240,7 +243,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 	// 4. 构建 Socks5.Server
 	//   - Dial 使用 tunNet 的 DialContext
 	//   - Resolver 使用并行 DNS + 缓存
-	dnsResolver := &ParallelCachedDNSResolver{
+	_ = &ParallelCachedDNSResolver{
 		TunNet:   tunNet,
 		DNSAddrs: dnsAddrs,
 		Timeout:  dnsTimeout,
@@ -252,10 +255,10 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		server = socks5.NewServer(
 			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
 			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("[Socks] Connecting to (%s) %s", network, addr)
+				//log.Printf("[Socks] Connecting to (%s) %s", network, addr)
 				return tunNet.DialContext(ctx, network, addr)
 			}),
-			socks5.WithResolver(dnsResolver),
+			//socks5.WithResolver(dnsResolver),
 		)
 	} else {
 		server = socks5.NewServer(
@@ -263,7 +266,7 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return tunNet.DialContext(ctx, network, addr)
 			}),
-			socks5.WithResolver(dnsResolver),
+			//socks5.WithResolver(dnsResolver),
 			socks5.WithAuthMethods(
 				[]socks5.Authenticator{
 					socks5.UserPassAuthenticator{
@@ -275,6 +278,10 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 			),
 		)
 	}
+
+	go func() {
+		log.Println(http.ListenAndServe(":6060", nil))
+	}()
 
 	// 5. 启动 SOCKS5 代理
 	log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
