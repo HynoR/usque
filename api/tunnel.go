@@ -16,11 +16,13 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+const packetBuffCap = 2048
+
 // 包级别的缓冲池，用于复用数据包缓冲区
 var packetBufferPool = sync.Pool{
 	New: func() interface{} {
 		// 默认分配MTU大小的缓冲区，实际使用时会根据需要调整
-		return make([]byte, 2048)
+		return make([]byte, packetBuffCap)
 	},
 }
 
@@ -128,8 +130,9 @@ func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// 创建一个新的切片保存实际数据，并归还原始缓冲区到池中
 	result := make([]byte, sizes[0])
 	copy(result, packetBufs[0][:sizes[0]])
-	if cap(packetBuf) < 4096 {
+	if cap(packetBuf) < 2*packetBuffCap {
 		packetBufferPool.Put(packetBuf) // 归还缓冲区
+
 	}
 
 	return result, nil
@@ -174,7 +177,7 @@ func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
 	// 创建一个新的切片保存实际数据，并归还原始缓冲区到池中
 	result := make([]byte, n)
 	copy(result, buf[:n])
-	if cap(buf) < 4096 {
+	if cap(buf) < 2*packetBuffCap {
 		packetBufferPool.Put(buf) // 归还缓冲区
 	}
 
@@ -512,7 +515,10 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 						errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
 						return
 					}
-					if cap(buf) < 4096 {
+					if cap(buf) < 2*packetBuffCap {
+						// log.Printf("buff cap changed! %d,%d", n, cap(buf))
+						// // 打印buf内容 16进制str
+						// log.Printf("buf content: %x", buf[:n])
 						packetBufferPool.Put(buf) // 归还缓冲区
 					}
 				}
