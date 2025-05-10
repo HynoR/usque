@@ -1,21 +1,26 @@
 FROM golang:alpine AS builder
-
 WORKDIR /app
-
 COPY go.mod .
 COPY go.sum .
-
 RUN go mod download
-
 COPY . .
-
 RUN go build -o usque -ldflags="-s -w" .
 
-# scratch won't be enough, because we need a cert store
 FROM alpine:latest
-
 WORKDIR /app
-
+# 安装curl工具
+RUN apk add --no-cache curl
+# 定义默认环境变量
+ENV USQUE_BIND_ADDRESS="127.0.0.1"
+ENV USQUE_PORT="1080"
+ENV USQUE_USERNAME=""
+ENV USQUE_PASSWORD=""
+# 复制脚本到容器中
+COPY entrypoint.sh /app/
+COPY healthcheck.sh /app/
+RUN chmod +x /app/entrypoint.sh /app/healthcheck.sh
 COPY --from=builder /app/usque /bin/usque
-
-ENTRYPOINT ["/bin/usque"]
+# 配置健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 CMD ["/app/healthcheck.sh"]
+# 使用entrypoint.sh作为入口点
+ENTRYPOINT ["/app/entrypoint.sh"]
