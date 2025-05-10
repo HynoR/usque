@@ -43,7 +43,7 @@ var (
 // regardless of the underlying implementation.
 type TunnelDevice interface {
 	// ReadPacket reads a packet from the device (using the given mtu) and returns its contents.
-	ReadPacket(mtu int) ([]byte, error)
+	ReadPacket(buf []byte) (int, error)
 	// WritePacket writes a packet to the device.
 	WritePacket(pkt []byte) error
 }
@@ -86,26 +86,34 @@ type NetstackAdapter struct {
 	dev tun.Device
 }
 
-func (n *NetstackAdapter) ReadPacket(mtu int) ([]byte, error) {
-	// Deprecated: 原始实现方式，直接创建新缓冲区
-	// For netstack TUN devices we need to use the multi-buffer interface.
-	// packetBufs := make([][]byte, 1)
-	// packetBufs[0] = make([]byte, mtu)
-	// sizes := make([]int, 1)
-	// _, err := n.dev.Read(packetBufs, sizes, 0)
-	// if err != nil {
-	//     return nil, err
-	// }
-	// return packetBufs[0][:sizes[0]], nil
+func (n *NetstackAdapter) ReadPacket(buf []byte) (int, error) {
 
-	// 从对象池获取缓冲区
+	//packetBuf := packetBufferPool.Get().([]byte)
+
+	packetBufs := packetBufsPool.Get().([][]byte)
+	sizes := sizesPool.Get().([]int)
+
+	// 确保在函数结束时将切片归还到对象池
+	defer func() {
+		packetBufs[0] = nil // 避免内存泄漏
+		packetBufsPool.Put(packetBufs)
+		sizesPool.Put(sizes)
+	}()
+
+	packetBufs[0] = buf
+	sizes[0] = 0
+
+	_, err := n.dev.Read(packetBufs, sizes, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	return sizes[0], nil
+}
+
+func (n *NetstackAdapter) ReadPacket1(mtu int) ([]byte, error) {
 
 	packetBuf := packetBufferPool.Get().([]byte)
-
-	// 为多缓冲区接口准备切片
-	// packetBufs := make([][]byte, 1)
-	// packetBufs[0] = packetBuf
-	// sizes := make([]int, 1)
 
 	packetBufs := packetBufsPool.Get().([][]byte)
 	sizes := sizesPool.Get().([]int)
@@ -154,34 +162,22 @@ type WaterAdapter struct {
 	iface *water.Interface
 }
 
-func (w *WaterAdapter) ReadPacket(mtu int) ([]byte, error) {
-	// Deprecated: 原始实现方式，每次都创建新缓冲区
-	// buf := make([]byte, mtu)
-	// n, err := w.iface.Read(buf)
-	// if err != nil {
-	//    return nil, err
-	// }
-	// return buf[:n], nil
+func (w *WaterAdapter) ReadPacket(buf []byte) (int, error) {
 
-	// 从对象池获取缓冲区
-
-	buf := packetBufferPool.Get().([]byte)
+	//buf := packetBufferPool.Get().([]byte)
 
 	n, err := w.iface.Read(buf)
 	if err != nil {
 		// 错误发生时，归还缓冲区到池中
 		packetBufferPool.Put(buf)
-		return nil, err
+		return 0, err
 	}
 
-	// 创建一个新的切片保存实际数据，并归还原始缓冲区到池中
-	result := make([]byte, n)
-	copy(result, buf[:n])
 	if cap(buf) < 2*packetBuffCap {
 		packetBufferPool.Put(buf) // 归还缓冲区
 	}
 
-	return result, nil
+	return n, nil
 }
 
 func (w *WaterAdapter) WritePacket(pkt []byte) error {
@@ -294,16 +290,25 @@ func MaintainTunnel(ctx context.Context, tlsConfig *tls.Config, keepalivePeriod 
 
 		go func() {
 			for {
-				pkt, err := device.ReadPacket(mtu)
+				buf := packetBufferPool.Get().([]byte)
+
+				n, err := device.ReadPacket(buf)
 				if err != nil {
+					packetBufferPool.Put(buf) // 归还缓冲区
 					errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
+
 					return
 				}
-				icmp, err := ipConn.WritePacket(pkt)
+				icmp, err := ipConn.WritePacket(buf[:n])
 				if err != nil {
+					packetBufferPool.Put(buf) // 归还缓冲区
 					errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
 					return
 				}
+				if cap(buf) < 2*packetBuffCap {
+					packetBufferPool.Put(buf) // 归还缓冲区
+				}
+
 				if len(icmp) > 0 {
 					if err := device.WritePacket(icmp); err != nil {
 						errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
@@ -425,25 +430,6 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 
 		// 从设备到IP连接的转发
 		go func() {
-			// Deprecated: 原始实现方式
-			// for {
-			//     pkt, err := device.ReadPacket(mtu)
-			//     if err != nil {
-			//         errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
-			//         return
-			//     }
-			//     icmp, err := ipConn.WritePacket(pkt)
-			//     if err != nil {
-			//         errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
-			//         return
-			//     }
-			//     if len(icmp) > 0 {
-			//         if err := device.WritePacket(icmp); err != nil {
-			//             errChan <- fmt.Errorf("failed to write ICMP to TUN device: %v", err)
-			//             return
-			//         }
-			//     }
-			// }
 
 			for {
 				select {
@@ -457,18 +443,24 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 					//	}
 					//	continue
 					//}
+					buf := packetBufferPool.Get().([]byte)
 
-					pkt, err := device.ReadPacket(config.MTU)
+					n, err := device.ReadPacket(buf)
 					if err != nil {
+						packetBufferPool.Put(buf) // 归还缓冲区
 						errChan <- fmt.Errorf("failed to read from TUN device: %v", err)
 						return
 					}
 
-					stats.RecordPacketOut(len(pkt))
-					icmp, err := ipConn.WritePacket(pkt)
+					stats.RecordPacketOut(n)
+					icmp, err := ipConn.WritePacket(buf[:n])
 					if err != nil {
+						packetBufferPool.Put(buf) // 归还缓冲区
 						errChan <- fmt.Errorf("failed to write to IP connection: %v", err)
 						return
+					}
+					if cap(buf) < 2*packetBuffCap {
+						packetBufferPool.Put(buf) // 归还缓冲区
 					}
 
 					if len(icmp) > 0 {
