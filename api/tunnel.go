@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/Diniboy1123/usque/internal"
 	"github.com/songgao/water"
-	"golang.org/x/time/rate"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
@@ -346,7 +344,7 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 	reconnectAttempt := 0
 
 	// 创建一个限速器来控制处理速率
-	limiter := rate.NewLimiter(rate.Limit(config.MaxPacketRate), config.MaxBurst)
+	//limiter := rate.NewLimiter(rate.Limit(config.MaxPacketRate), config.MaxBurst)
 
 	for {
 		select {
@@ -450,12 +448,12 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 					return
 				default:
 					// 应用速率限制
-					if err := limiter.Wait(forwardingCtx); err != nil {
-						if errors.Is(err, context.Canceled) {
-							return
-						}
-						continue
-					}
+					//if err := limiter.Wait(forwardingCtx); err != nil {
+					//	if errors.Is(err, context.Canceled) {
+					//		return
+					//	}
+					//	continue
+					//}
 
 					pkt, err := device.ReadPacket(config.MTU)
 					if err != nil {
@@ -483,19 +481,6 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 
 		// 从IP连接到设备的转发
 		go func() {
-			// Deprecated: 原始实现方式
-			// buf := make([]byte, mtu)
-			// for {
-			//     n, err := ipConn.ReadPacket(buf, true)
-			//     if err != nil {
-			//         errChan <- fmt.Errorf("failed to read from IP connection: %v", err)
-			//         return
-			//     }
-			//     if err := device.WritePacket(buf[:n]); err != nil {
-			//         errChan <- fmt.Errorf("failed to write to TUN device: %v", err)
-			//         return
-			//     }
-			// }
 
 			for {
 				select {
@@ -503,12 +488,12 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 					return
 				default:
 					// 应用速率限制
-					if err := limiter.Wait(forwardingCtx); err != nil {
-						if errors.Is(err, context.Canceled) {
-							return
-						}
-						continue
-					}
+					//if err := limiter.Wait(forwardingCtx); err != nil {
+					//	if errors.Is(err, context.Canceled) {
+					//		return
+					//	}
+					//	continue
+					//}
 
 					// 从对象池获取缓冲区
 
@@ -589,32 +574,3 @@ func MaintainTunnelV2(ctx context.Context, config ConnectionConfig, device Tunne
 		}
 	}
 }
-
-// 使用优化后的MaintainTunnel的示例
-//func Example_optimizedUsage() {
-//	// 创建TUN设备
-//	device := /* ... 创建或获取TUN设备 */
-//
-//	// 创建上下文，用于控制整个隧道生命周期
-//	ctx, cancel := context.WithCancel(context.Background())
-//	defer cancel()
-//
-//	// 配置连接
-//	config := ConnectionConfig{
-//		TLSConfig:         createTLSConfig(),
-//		KeepAlivePeriod:   30 * time.Second,
-//		InitialPacketSize: 1280,
-//		Endpoint:          &net.UDPAddr{IP: net.ParseIP("1.2.3.4"), Port: 443},
-//		MTU:               1500,
-//		MaxPacketRate:     5000, // 每秒5000个数据包
-//		MaxBurst:          500,  // 突发最多处理500个数据包
-//		ReconnectStrategy: &ExponentialBackoff{
-//			InitialDelay: 1 * time.Second,
-//			MaxDelay:     5 * time.Minute,
-//			Factor:       2.0,
-//		},
-//	}
-//
-//	// 启动隧道维护
-//	MaintainTunnel(ctx, config, device)
-//}

@@ -18,9 +18,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/things-go/go-socks5"
 	"golang.zx2c4.com/wireguard/tun/netstack"
-
-	"net/http"
-	_ "net/http/pprof"
+	// "net/http"
+	// _ "net/http/pprof"
 )
 
 // socksCmd 命令。
@@ -47,7 +46,7 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
-	socksCmd.Flags().DurationP("connection-timeout", "c", 30*time.Second, "Timeout for establishing connections")
+	socksCmd.Flags().Duration("connection-timeout", 30*time.Second, "Timeout for establishing connections")
 	socksCmd.Flags().DurationP("idle-timeout", "I", 5*time.Minute, "Timeout for idle connections")
 
 	// 把 socksCmd 注册到根命令（如果有的话）
@@ -325,9 +324,9 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		)
 	}
 
-	go func() {
-		log.Println(http.ListenAndServe(":6060", nil))
-	}()
+	// go func() {
+	// 	log.Println(http.ListenAndServe(":6060", nil))
+	// }()
 
 	log.Printf("SOCKS proxy listening on %s:%s with timeouts (connect: %s, idle: %s)",
 		bindAddress, port, connectionTimeout, idleTimeout)
