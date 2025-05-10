@@ -47,9 +47,37 @@ func init() {
 	socksCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
+	socksCmd.Flags().DurationP("connection-timeout", "c", 30*time.Second, "Timeout for establishing connections")
+	socksCmd.Flags().DurationP("idle-timeout", "I", 5*time.Minute, "Timeout for idle connections")
 
 	// 把 socksCmd 注册到根命令（如果有的话）
 	rootCmd.AddCommand(socksCmd)
+}
+
+// 超时管理的连接包装器
+type timeoutConn struct {
+	net.Conn
+	idleTimeout time.Duration
+}
+
+func (c *timeoutConn) Read(b []byte) (int, error) {
+	if c.idleTimeout > 0 {
+		err := c.Conn.SetReadDeadline(time.Now().Add(c.idleTimeout))
+		if err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *timeoutConn) Write(b []byte) (int, error) {
+	if c.idleTimeout > 0 {
+		err := c.Conn.SetWriteDeadline(time.Now().Add(c.idleTimeout))
+		if err != nil {
+			return 0, err
+		}
+	}
+	return c.Conn.Write(b)
 }
 
 // runSocksCmd 是 socksCmd 的执行逻辑
@@ -203,11 +231,16 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		password = p
 	}
 
-	//reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
-	//if err != nil {
-	//	cmd.Printf("Failed to get reconnect delay: %v\n", err)
-	//	return
-	//}
+	// 获取超时设置
+	connectionTimeout, _ := cmd.Flags().GetDuration("connection-timeout")
+	if connectionTimeout == 0 {
+		connectionTimeout = 30 * time.Second
+	}
+
+	idleTimeout, _ := cmd.Flags().GetDuration("idle-timeout")
+	if idleTimeout == 0 {
+		idleTimeout = 5 * time.Minute
+	}
 
 	// 2. 创建 TUN 设备
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
@@ -252,22 +285,33 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 
 	localResolver := internal.NewCachingDNSResolver("", 0)
 
+	// 添加超时设置的拨号函数
+	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
+		defer cancel()
+
+		conn, err := tunNet.DialContext(dialCtx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		return &timeoutConn{
+			Conn:        conn,
+			idleTimeout: idleTimeout,
+		}, nil
+	}
+
 	var server *socks5.Server
 	if username == "" || password == "" {
 		server = socks5.NewServer(
 			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-				//log.Printf("[Socks] Connecting to (%s) %s", network, addr)
-				return tunNet.DialContext(ctx, network, addr)
-			}),
+			socks5.WithDial(dialFunc),
 			socks5.WithResolver(localResolver),
 		)
 	} else {
 		server = socks5.NewServer(
 			socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
-			socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return tunNet.DialContext(ctx, network, addr)
-			}),
+			socks5.WithDial(dialFunc),
 			socks5.WithResolver(localResolver),
 			socks5.WithAuthMethods(
 				[]socks5.Authenticator{
@@ -285,11 +329,28 @@ func runSocksCmd(cmd *cobra.Command, args []string) {
 		log.Println(http.ListenAndServe(":6060", nil))
 	}()
 
-	// 5. 启动 SOCKS5 代理
-	log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
-	if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
+	log.Printf("SOCKS proxy listening on %s:%s with timeouts (connect: %s, idle: %s)",
+		bindAddress, port, connectionTimeout, idleTimeout)
+
+	listener, err := net.Listen("tcp", net.JoinHostPort(bindAddress, port))
+	if err != nil {
 		cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
 		return
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Failed to accept connection: %v\n", err)
+			continue
+		}
+
+		timeoutConn := &timeoutConn{
+			Conn:        conn,
+			idleTimeout: idleTimeout,
+		}
+
+		go server.ServeConn(timeoutConn)
 	}
 }
 
